@@ -13,7 +13,8 @@ import lombok.AllArgsConstructor;
 import lombok.Getter;
 import lombok.NoArgsConstructor;
 
-import java.util.Random;
+import java.util.HashSet;
+import java.util.List;
 import java.util.Set;
 
 public class DependencyWorker extends AbstractBehavior<DependencyWorker.Message> {
@@ -22,7 +23,7 @@ public class DependencyWorker extends AbstractBehavior<DependencyWorker.Message>
 	// Actor Messages //
 	////////////////////
 
-	public interface Message extends AkkaSerializable {
+	public interface Message extends AkkaSerializable, LargeMessageProxy.LargeMessage {
 	}
 
 	@Getter
@@ -39,7 +40,12 @@ public class DependencyWorker extends AbstractBehavior<DependencyWorker.Message>
 	public static class TaskMessage implements Message {
 		private static final long serialVersionUID = -4667745204456518160L;
 		ActorRef<LargeMessageProxy.Message> dependencyMinerLargeMessageProxy;
-		int task;
+		int lhsFileId;
+		int rhsFileId;
+		String lhsColumn;
+		String rhsColumn;
+		List<String> lhsValues;
+		List<String> rhsValues;
 	}
 
 	////////////////////////
@@ -55,10 +61,12 @@ public class DependencyWorker extends AbstractBehavior<DependencyWorker.Message>
 	private DependencyWorker(ActorContext<Message> context) {
 		super(context);
 
-		final ActorRef<Receptionist.Listing> listingResponseAdapter = context.messageAdapter(Receptionist.Listing.class, ReceptionistListingMessage::new);
+		final ActorRef<Receptionist.Listing> listingResponseAdapter =
+				context.messageAdapter(Receptionist.Listing.class, ReceptionistListingMessage::new);
 		context.getSystem().receptionist().tell(Receptionist.subscribe(DependencyMiner.dependencyMinerService, listingResponseAdapter));
 
-		this.largeMessageProxy = this.getContext().spawn(LargeMessageProxy.create(this.getContext().getSelf().unsafeUpcast()), LargeMessageProxy.DEFAULT_NAME);
+		this.largeMessageProxy = this.getContext().spawn(LargeMessageProxy.create(this.getContext().getSelf().unsafeUpcast()),
+				LargeMessageProxy.DEFAULT_NAME);
 	}
 
 	/////////////////
@@ -82,24 +90,26 @@ public class DependencyWorker extends AbstractBehavior<DependencyWorker.Message>
 	private Behavior<Message> handle(ReceptionistListingMessage message) {
 		Set<ActorRef<DependencyMiner.Message>> dependencyMiners = message.getListing().getServiceInstances(DependencyMiner.dependencyMinerService);
 		for (ActorRef<DependencyMiner.Message> dependencyMiner : dependencyMiners)
-			dependencyMiner.tell(new DependencyMiner.RegistrationMessage(this.getContext().getSelf()));
+			dependencyMiner.tell(new DependencyMiner.RegistrationMessage(this.getContext().getSelf(), this.largeMessageProxy));
 		return this;
 	}
 
 	private Behavior<Message> handle(TaskMessage message) {
 		this.getContext().getLog().info("Working!");
-		// I should probably know how to solve this task, but for now I just pretend some work...
 
-		int result = message.getTask();
-		long time = System.currentTimeMillis();
-		Random rand = new Random();
-		int runtime = (rand.nextInt(2) + 2) * 1000;
-		while (System.currentTimeMillis() - time < runtime)
-			result = ((int) Math.abs(Math.sqrt(result)) * result) % 1334525;
+		final boolean isValidInclusionDependency = isValidInclusionDependency(message);
 
-		LargeMessageProxy.LargeMessage completionMessage = new DependencyMiner.CompletionMessage(this.getContext().getSelf(), result);
+		final LargeMessageProxy.LargeMessage completionMessage =
+				new DependencyMiner.CompletionMessage(this.getContext().getSelf(), message, isValidInclusionDependency);
 		this.largeMessageProxy.tell(new LargeMessageProxy.SendMessage(completionMessage, message.getDependencyMinerLargeMessageProxy()));
 
 		return this;
+	}
+
+	private boolean isValidInclusionDependency(TaskMessage message) {
+		final HashSet<String> distinctLhsValues = new HashSet<>(message.getLhsValues());
+		final HashSet<String> distinctRhsValues = new HashSet<>(message.getRhsValues());
+
+		return new HashSet<>(distinctRhsValues).containsAll(distinctLhsValues);
 	}
 }
