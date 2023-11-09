@@ -19,6 +19,9 @@ import java.util.Set;
 
 public class DependencyWorker extends AbstractBehavior<DependencyWorker.Message> {
 
+	//TODO: What happens when the system shuts down?
+	//TODO: What happens if the worker node shuts down? Maybe: slides "Continue message"
+
 	////////////////////
 	// Actor Messages //
 	////////////////////
