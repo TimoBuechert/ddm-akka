@@ -102,6 +102,7 @@ public class DependencyWorker extends AbstractBehavior<DependencyWorker.Message>
 
 		final boolean isValidInclusionDependency = isValidInclusionDependency(message);
 
+		//TODO: not the whole message needs to be sent back, only the result
 		final LargeMessageProxy.LargeMessage completionMessage =
 				new DependencyMiner.CompletionMessage(this.getContext().getSelf(), message, isValidInclusionDependency);
 		this.largeMessageProxy.tell(new LargeMessageProxy.SendMessage(completionMessage, message.getDependencyMinerLargeMessageProxy()));
