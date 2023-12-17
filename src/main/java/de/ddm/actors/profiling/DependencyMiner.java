@@ -281,6 +281,7 @@ public class DependencyMiner extends AbstractBehavior<DependencyMiner.Message> {
 		if (this.unassignedTasks.isEmpty() && this.dependencyWorkers.stream().noneMatch(DependencyWorkerHolder::isBusy)) {
 			this.end();
 		}
+		this.getContext().getLog().info("Unassigned task queue size {}", this.unassignedTasks.size());
 	}
 
 	private InclusionDependency getInclusionDependency(CompletionMessage message) {
@@ -302,7 +303,11 @@ public class DependencyMiner extends AbstractBehavior<DependencyMiner.Message> {
 
 	private Behavior<Message> handle(Terminated signal) {
 		ActorRef<DependencyWorker.Message> dependencyWorker = signal.getRef().unsafeUpcast();
-		this.dependencyWorkers.remove(dependencyWorker);
+
+		this.dependencyWorkers.stream()
+				.filter(dependencyWorkerHolder -> dependencyWorkerHolder.getDependencyWorker().equals(dependencyWorker))
+				.forEach(this.dependencyWorkers::remove);
+
 		return this;
 	}
 }
