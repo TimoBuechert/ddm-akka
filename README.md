@@ -23,7 +23,13 @@ Akka example and homework code for the "Big Data Systems" lecture.
   mvn package
   ```
 
-4. First run
+4. Run master
   ```
-  java -jar target/ddm-akka-1.0.jar master
+  java -jar target/ddm-akka-1.0.jar master -h 192.168.178.25
+  ```
+
+5. Run worker
+
+  ```
+    java -jar target/ddm-akka-1.0.jar worker -mh 192.168.178.25 -mp 7877
   ```

@@ -10,18 +10,25 @@ import akka.actor.typed.javadsl.Receive;
 import akka.actor.typed.receptionist.Receptionist;
 import akka.actor.typed.receptionist.ServiceKey;
 import de.ddm.actors.patterns.LargeMessageProxy;
+import de.ddm.mapping.BatchesToTableMapper;
 import de.ddm.serialization.AkkaSerializable;
 import de.ddm.singletons.InputConfigurationSingleton;
 import de.ddm.singletons.SystemConfigurationSingleton;
+import de.ddm.structures.DependencyWorkerHolder;
 import de.ddm.structures.InclusionDependency;
+import de.ddm.structures.Table;
 import lombok.AllArgsConstructor;
 import lombok.Getter;
 import lombok.NoArgsConstructor;
 
 import java.io.File;
 import java.util.ArrayList;
+import java.util.HashMap;
+import java.util.LinkedList;
 import java.util.List;
-import java.util.Random;
+import java.util.Map;
+import java.util.Optional;
+import java.util.Queue;
 
 public class DependencyMiner extends AbstractBehavior<DependencyMiner.Message> {
 
@@ -61,6 +68,7 @@ public class DependencyMiner extends AbstractBehavior<DependencyMiner.Message> {
 	public static class RegistrationMessage implements Message {
 		private static final long serialVersionUID = -4025238529984914107L;
 		ActorRef<DependencyWorker.Message> dependencyWorker;
+		ActorRef<LargeMessageProxy.Message> dependencyWorkerLargeMessageProxy;
 	}
 
 	@Getter
@@ -69,7 +77,14 @@ public class DependencyMiner extends AbstractBehavior<DependencyMiner.Message> {
 	public static class CompletionMessage implements Message {
 		private static final long serialVersionUID = -7642425159675583598L;
 		ActorRef<DependencyWorker.Message> dependencyWorker;
-		int result;
+		DependencyWorker.TaskMessage task;
+		boolean isValidInclusionDependency;
+	}
+
+	@Getter
+	@NoArgsConstructor
+	public static class DataLoadingCompletedMessage implements Message {
+		private static final long serialVersionUID = -4184858160945792991L;
 	}
 
 	////////////////////////
@@ -91,8 +106,12 @@ public class DependencyMiner extends AbstractBehavior<DependencyMiner.Message> {
 		this.headerLines = new String[this.inputFiles.length][];
 
 		this.inputReaders = new ArrayList<>(inputFiles.length);
-		for (int id = 0; id < this.inputFiles.length; id++)
+		for (int id = 0; id < this.inputFiles.length; id++) {
 			this.inputReaders.add(context.spawn(InputReader.create(id, this.inputFiles[id]), InputReader.DEFAULT_NAME + "_" + id));
+			this.batches.put(id, new ArrayList<>());
+			this.fileIds.add(id);
+			this.readingComplete.put(id, false);
+		}
 		this.resultCollector = context.spawn(ResultCollector.create(), ResultCollector.DEFAULT_NAME);
 		this.largeMessageProxy = this.getContext().spawn(LargeMessageProxy.create(this.getContext().getSelf().unsafeUpcast()), LargeMessageProxy.DEFAULT_NAME);
 
@@ -115,7 +134,15 @@ public class DependencyMiner extends AbstractBehavior<DependencyMiner.Message> {
 	private final ActorRef<ResultCollector.Message> resultCollector;
 	private final ActorRef<LargeMessageProxy.Message> largeMessageProxy;
 
-	private final List<ActorRef<DependencyWorker.Message>> dependencyWorkers;
+	private final List<DependencyWorkerHolder> dependencyWorkers;
+
+	private final Map<Integer, List<List<String[]>>> batches = new HashMap<>();
+
+	private final Map<Integer, Boolean> readingComplete = new HashMap<>();
+
+	private final List<Integer> fileIds = new ArrayList<>();
+
+	private final Queue<DependencyWorker.TaskMessage> unassignedTasks = new LinkedList<>();
 
 	////////////////////
 	// Actor Behavior //
@@ -127,6 +154,7 @@ public class DependencyMiner extends AbstractBehavior<DependencyMiner.Message> {
 				.onMessage(StartMessage.class, this::handle)
 				.onMessage(BatchMessage.class, this::handle)
 				.onMessage(HeaderMessage.class, this::handle)
+				.onMessage(DataLoadingCompletedMessage.class, this::handle)
 				.onMessage(RegistrationMessage.class, this::handle)
 				.onMessage(CompletionMessage.class, this::handle)
 				.onSignal(Terminated.class, this::handle)
@@ -148,53 +176,123 @@ public class DependencyMiner extends AbstractBehavior<DependencyMiner.Message> {
 	}
 
 	private Behavior<Message> handle(BatchMessage message) {
-		// Ignoring batch content for now ... but I could do so much with it.
+		final int fileId = message.getId();
 
-		if (message.getBatch().size() != 0)
-			this.inputReaders.get(message.getId()).tell(new InputReader.ReadBatchMessage(this.getContext().getSelf()));
+		if (!message.getBatch().isEmpty()) { //reading not done yet, tell input reader to read more
+			this.batches.get(fileId).add(message.getBatch());
+			this.inputReaders.get(fileId).tell(new InputReader.ReadBatchMessage(this.getContext().getSelf()));
+			return this;
+		}
+
+		//if we reach this point, the reading is done for a specific file id, since we got an empty batch
+		this.readingComplete.put(fileId, true);
+
+		//now check, if we read all files
+		if (isInputComplete()) { //TODO: Collecting the data can be extracted into other actor
+			this.getContext().getSelf().tell(new DependencyMiner.DataLoadingCompletedMessage());
+		}
+
 		return this;
+	}
+
+	private boolean isInputComplete() {
+		return this.fileIds.stream().allMatch(fileId -> this.readingComplete.get(fileId).equals(true));
+	}
+
+	private Behavior<Message> handle(final DataLoadingCompletedMessage message) {
+		final List<Table> tables = BatchesToTableMapper.convertToTables(this.headerLines, this.batches);
+		createUnaryCandidatesAndAddToUnassignedTasks(tables);
+		return this;
+	}
+
+	private void createUnaryCandidatesAndAddToUnassignedTasks(final List<Table> tables) {
+		for (final Table tableLeft : tables) {
+			for (final Table tableRight : tables) {
+				for (final String attributeLeft : tableLeft.getHeader()) {
+					final int attributeIndexLeft = tableLeft.getHeader().indexOf(attributeLeft);
+
+					for (final String attributeRight : tableRight.getHeader()) {
+						final int attributeIndexRight = tableRight.getHeader().indexOf(attributeRight);
+
+						if (tableLeft.getId() != tableRight.getId() || !attributeLeft.equals(attributeRight)) {
+							this.unassignedTasks.add(new DependencyWorker.TaskMessage(
+									this.largeMessageProxy,
+									tableLeft.getId(),
+									tableRight.getId(), attributeLeft, attributeRight,
+									tableLeft.getData().get(attributeIndexLeft),
+									tableRight.getData().get(attributeIndexRight)));
+						}
+					}
+				}
+			}
+		}
 	}
 
 	private Behavior<Message> handle(RegistrationMessage message) {
 		ActorRef<DependencyWorker.Message> dependencyWorker = message.getDependencyWorker();
-		if (!this.dependencyWorkers.contains(dependencyWorker)) {
-			this.dependencyWorkers.add(dependencyWorker);
+		if (!this.getWorker(dependencyWorker).isPresent()) {
+			this.dependencyWorkers.add(DependencyWorkerHolder.builder()
+					.dependencyWorker(dependencyWorker)
+					.dependencyWorkerLargeMessageProxy(message.getDependencyWorkerLargeMessageProxy())
+					.isBusy(false)
+					.build());
 			this.getContext().watch(dependencyWorker);
-			// The worker should get some work ... let me send her something before I figure out what I actually want from her.
-			// I probably need to idle the worker for a while, if I do not have work for it right now ... (see master/worker pattern)
 
-			dependencyWorker.tell(new DependencyWorker.TaskMessage(this.largeMessageProxy, 42));
+			this.assignTaskToNonBusyWorkers();
 		}
 		return this;
 	}
 
-	private Behavior<Message> handle(CompletionMessage message) {
-		ActorRef<DependencyWorker.Message> dependencyWorker = message.getDependencyWorker();
-		// If this was a reasonable result, I would probably do something with it and potentially generate more work ... for now, let's just generate a random, binary IND.
+	private void assignTaskToNonBusyWorkers() {
+		this.dependencyWorkers.stream().filter(worker -> !worker.isBusy()).forEach(worker -> {
+			if (!this.unassignedTasks.isEmpty()) {
+				DependencyWorker.TaskMessage task = this.unassignedTasks.poll();
+				this.largeMessageProxy.tell(
+						new LargeMessageProxy.SendMessage(task, worker.getDependencyWorkerLargeMessageProxy()));
+				worker.setBusy(true);
+			}
+		});
+	}
 
-		if (this.headerLines[0] != null) {
-			Random random = new Random();
-			int dependent = random.nextInt(this.inputFiles.length);
-			int referenced = random.nextInt(this.inputFiles.length);
-			File dependentFile = this.inputFiles[dependent];
-			File referencedFile = this.inputFiles[referenced];
-			String[] dependentAttributes = {this.headerLines[dependent][random.nextInt(this.headerLines[dependent].length)], this.headerLines[dependent][random.nextInt(this.headerLines[dependent].length)]};
-			String[] referencedAttributes = {this.headerLines[referenced][random.nextInt(this.headerLines[referenced].length)], this.headerLines[referenced][random.nextInt(this.headerLines[referenced].length)]};
-			InclusionDependency ind = new InclusionDependency(dependentFile, dependentAttributes, referencedFile, referencedAttributes);
-			List<InclusionDependency> inds = new ArrayList<>(1);
-			inds.add(ind);
+	private Optional<DependencyWorkerHolder> getWorker(ActorRef<DependencyWorker.Message> dependencyWorker) {
+		return this.dependencyWorkers.stream()
+				.filter(worker -> worker.getDependencyWorker().equals(dependencyWorker))
+				.findFirst();
+	}
 
-			this.resultCollector.tell(new ResultCollector.ResultMessage(inds));
+	private Behavior<Message> handle(final CompletionMessage message) {
+		if (message.isValidInclusionDependency()) {
+			final InclusionDependency ind = getInclusionDependency(message);
+			this.resultCollector.tell(new ResultCollector.ResultMessage(List.of(ind)));
 		}
-		// I still don't know what task the worker could help me to solve ... but let me keep her busy.
-		// Once I found all unary INDs, I could check if this.discoverNaryDependencies is set to true and try to detect n-ary INDs as well!
 
-		dependencyWorker.tell(new DependencyWorker.TaskMessage(this.largeMessageProxy, 42));
+		final Optional<DependencyWorkerHolder> workerHolder = this.getWorker(message.getDependencyWorker());
+		if (workerHolder.isPresent()) {
+			workerHolder.get().setBusy(false);
+			this.assignTaskToNonBusyWorkers();
+		}
 
-		// At some point, I am done with the discovery. That is when I should call my end method. Because I do not work on a completable task yet, I simply call it after some time.
-		if (System.currentTimeMillis() - this.startTime > 2000000)
-			this.end();
+		this.checkIfFinished();
+
 		return this;
+	}
+
+	private void checkIfFinished() {
+		if (this.unassignedTasks.isEmpty() && this.dependencyWorkers.stream().noneMatch(DependencyWorkerHolder::isBusy)) {
+			this.end();
+		}
+		this.getContext().getLog().info("Unassigned task queue size {}", this.unassignedTasks.size());
+	}
+
+	private InclusionDependency getInclusionDependency(CompletionMessage message) {
+		final int dependent = message.getTask().getLhsFileId();
+		final int referenced = message.getTask().getRhsFileId();
+		final File dependentFile = this.inputFiles[dependent];
+		final File referencedFile = this.inputFiles[referenced];
+		final String[] dependentAttributes = {message.getTask().getLhsColumn()};
+		final String[] referencedAttributes = {message.getTask().getRhsColumn()};
+		final InclusionDependency ind = new InclusionDependency(dependentFile, dependentAttributes, referencedFile, referencedAttributes);
+		return ind;
 	}
 
 	private void end() {
@@ -205,7 +303,11 @@ public class DependencyMiner extends AbstractBehavior<DependencyMiner.Message> {
 
 	private Behavior<Message> handle(Terminated signal) {
 		ActorRef<DependencyWorker.Message> dependencyWorker = signal.getRef().unsafeUpcast();
-		this.dependencyWorkers.remove(dependencyWorker);
+
+		this.dependencyWorkers.stream()
+				.filter(dependencyWorkerHolder -> dependencyWorkerHolder.getDependencyWorker().equals(dependencyWorker))
+				.forEach(this.dependencyWorkers::remove);
+
 		return this;
 	}
 }
