@@ -101,7 +101,7 @@ public class InputReader extends AbstractBehavior<InputReader.Message> {
 				break;
 			batch.add(line);
 		}
-
+		this.getContext().getLog().info("Read batch of size {}, Current free heap memory in bytes {}", batch.size(), Runtime.getRuntime().freeMemory());
 		message.getReplyTo().tell(new DependencyMiner.BatchMessage(this.id, batch));
 		return this;
 	}

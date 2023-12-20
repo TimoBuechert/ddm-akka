@@ -33,6 +33,8 @@ public class BatchesToTableMapper {
             table.setData(convertData(headerLines[i], batches.get(i)));
 
             tables.add(table);
+            headerLines[i] = null;
+            batches.remove(i);
         }
         return tables;
     }
