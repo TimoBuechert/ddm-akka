@@ -19,9 +19,6 @@ import java.util.Set;
 
 public class DependencyWorker extends AbstractBehavior<DependencyWorker.Message> {
 
-	//TODO: What happens when the system shuts down?
-	//TODO: What happens if the worker node shuts down? Maybe: slides "Continue message"
-
 	////////////////////
 	// Actor Messages //
 	////////////////////
@@ -102,7 +99,6 @@ public class DependencyWorker extends AbstractBehavior<DependencyWorker.Message>
 
 		final boolean isValidInclusionDependency = isValidInclusionDependency(message);
 
-		//TODO: not the whole message needs to be sent back, only the result
 		final LargeMessageProxy.LargeMessage completionMessage =
 				new DependencyMiner.CompletionMessage(this.getContext().getSelf(), message, isValidInclusionDependency);
 		this.largeMessageProxy.tell(new LargeMessageProxy.SendMessage(completionMessage, message.getDependencyMinerLargeMessageProxy()));
@@ -114,6 +110,6 @@ public class DependencyWorker extends AbstractBehavior<DependencyWorker.Message>
 		final HashSet<String> distinctLhsValues = new HashSet<>(message.getLhsValues());
 		final HashSet<String> distinctRhsValues = new HashSet<>(message.getRhsValues());
 
-		return new HashSet<>(distinctRhsValues).containsAll(distinctLhsValues);
+		return distinctRhsValues.containsAll(distinctLhsValues);
 	}
 }

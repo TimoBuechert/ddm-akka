@@ -201,7 +201,8 @@ public class DependencyMiner extends AbstractBehavior<DependencyMiner.Message> {
 
 	private Behavior<Message> handle(final DataLoadingCompletedMessage message) {
 		final List<Table> tables = BatchesToTableMapper.convertToTables(this.headerLines, this.batches);
-		createUnaryCandidatesAndAddToUnassignedTasks(tables);
+		this.createUnaryCandidatesAndAddToUnassignedTasks(tables);
+		this.assignTaskToNonBusyWorkers();
 		return this;
 	}
 
